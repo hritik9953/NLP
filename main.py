@@ -1,67 +1,111 @@
-import os
+# Importing the libraries
+import pandas as pd
+from bs4 import BeautifulSoup
+import re
+import nltk
+nltk.download('stopwords')
+from nltk.corpus import stopwords
+from nltk.stem.wordnet import WordNetLemmatizer
 
-import tweepy
-import numpy as np
-from textblob import TextBlob
+# To count the iterations 
+from tqdm import tqdm
 
-consumer_key=os.environ['your_consumer_key']
-consumer_secret=os.environ['consumer_secret']
+# Importing the dataset
+dataset = pd.read_csv('Reviews.csv')
 
-access_token=os.environ['access_token']
-access_token_secret=os.environ['access_token_secret']
+# Dropping the dups in dataset
+dataset = dataset.drop_duplicates(subset={"UserId","ProfileName","Time","Text"}, keep='first', inplace=False)
 
-auth = tweepy.OAuthHandler(consumer_key,consumer_secret)
-auth.set_access_token(access_token,access_token_secret)
+def removeHTMLTags(review):
+    soup = BeautifulSoup(review, 'lxml')
+    return soup.get_text()
 
-api = tweepy.API(auth)
+def removeApostrophe(review):
+    phrase = re.sub(r"won't", "will not", review)
+    phrase = re.sub(r"can\'t", "can not", review)
+    phrase = re.sub(r"n\'t", " not", review)
+    phrase = re.sub(r"\'re", " are", review)
+    phrase = re.sub(r"\'s", " is", review)
+    phrase = re.sub(r"\'d", " would", review)
+    phrase = re.sub(r"\'ll", " will", review)
+    phrase = re.sub(r"\'t", " not", review)
+    phrase = re.sub(r"\'ve", " have", review)
+    phrase = re.sub(r"\'m", " am", review)
+    return phrase
 
-def is_english(text):
-    if text.detect_language() == 'en':
-        return True
-    return False
+def removeAlphaNumericWords(review):
+     return re.sub("\S*\d\S*", "", review).strip()
+ 
+def removeSpecialChars(review):
+     return re.sub('[^a-zA-Z]', ' ', review)
 
-def tweet_analysis(query):
-    tweets = tweepy.Cursor(api.search, q=query + " -filter:retweets").items(20)
+def scorePartition(x):
+    if x < 3:
+        return 0
+    return 1
 
-    subjectivities = []
-    polarities = []
+def doTextCleaning(review):
+    review = removeHTMLTags(review)
+    review = removeApostrophe(review)
+    review = removeAlphaNumericWords(review)
+    review = removeSpecialChars(review) 
+    # Lower casing
+    review = review.lower()  
+    #Tokenization
+    review = review.split()
+    #Removing Stopwords and Lemmatization
+    lmtzr = WordNetLemmatizer()
+    review = [lmtzr.lemmatize(word, 'v') for word in review if not word in set(stopwords.words('english'))]
+    review = " ".join(review)    
+    return review
 
-    for tweet in tweets:
-        phrase = TextBlob(tweet.text)
+# Generalizing the score
+actualScore = dataset['Score']
+positiveNegative = actualScore.map(scorePartition) 
+dataset['Score'] = positiveNegative
 
-        if not is_english(phrase):
-            phrase = TextBlob(str(phrase.translate(to='en')))
+# creating the document corpus
+corpus = []   
+for index, row in tqdm(dataset.iterrows()):
+    review = doTextCleaning(row['Text'])
+    corpus.append(review)
+    
+# Creating the Bag of Words model
+from sklearn.feature_extraction.text import CountVectorizer
 
-        if phrase.sentiment.polarity != 0.0 and phrase.sentiment.subjectivity != 0.0:
-            polarities.append(phrase.sentiment.polarity)
-            subjectivities.append(phrase.sentiment.subjectivity)
+#Creating a tranform
+cv = CountVectorizer(ngram_range=(1,3), max_features = 5000)
+X = cv.fit_transform(corpus).toarray()
+y = dataset.iloc[:,6].values
 
-        print('Tweet: ' + tweet.text)
-        print('Polarity: ' + str(phrase.sentiment.polarity) + " \ " + str(phrase.sentiment.subjectivity))
-        print('.....................')
+# Splitting the dataset into the Training set and Test set
+from sklearn.cross_validation import train_test_split
+X_train, X_test, y_train, y_test = train_test_split(X, y, test_size = 0.20, random_state = 0)
 
-    return {'polarity':polarities, 'subjectivity':subjectivities}
+# Fitting Naive Bayes to the Training set
+from sklearn.naive_bayes import GaussianNB
+classifier = GaussianNB()
+classifier.fit(X_train, y_train)
 
-def get_weighted_polarity_mean(valid_tweets):
-    return np.average(valid_tweets['polarity'],weights=valid_tweets['subjectivity'])
+# Predicting the Test set results
+y_pred = classifier.predict(X_test)
 
-def get_polarity_mean(valid_tweets):
-    return np.mean(valid_tweets['polarity'])
+# Making the Confusion Matrix
+from sklearn.metrics import confusion_matrix
+cm = confusion_matrix(y_test, y_pred)
 
-def print_result(mean):
-    if mean > 0.0:
-        print('POSITIVE')
-    elif mean == 0.0:
-        print('NEUTRAL')
+# Predict the sentiment for new review
+def predictNewReview():
+    newReview = input("Type the Review: ")
+    
+    if newReview =='':
+        print('Invalid Review')  
     else:
-        print('NEGATIVE')
-
-if __name__ == "__main__":
-    query = input("Input query for analysis: ")
-    analysis = tweet_analysis(query)
-
-    print('WEIGHTED POLARITY MEAN: ' + str(get_weighted_polarity_mean(analysis)))
-    print_result(get_weighted_polarity_mean(analysis))
-
-    print('POLARITY MEAN: ' + str(get_polarity_mean(analysis)))
-    print_result(get_polarity_mean(analysis))
+        newReview = doTextCleaning(newReview)
+        new_review = cv.transform([newReview]).toarray()  
+        prediction =  classifier.predict(new_review)
+        print(prediction)
+        if prediction[0] == 1:
+            print( "Positive Review" )
+        else:        
+            print( "Negative Review")
